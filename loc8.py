@@ -1,66 +1,86 @@
 """Loc8."""
 
-import argparse
+from collections import deque
 
+import matplotlib.pyplot as plt
 import numpy as np
+import rl.core as krl
 from keras.layers import LSTM, Activation, Dense
 from keras.models import Sequential
 from keras.optimizers import Adam
-
-import rl.core as krl
 from rl.agents.dqn import DQNAgent
 from rl.memory import SequentialMemory
 from rl.policy import EpsGreedyQPolicy
+from sklearn.cluster import MiniBatchKMeans
+from sklearn.utils.extmath import cartesian
 
 
 class Loc8World:
     """Loc8 world simulator."""
 
-    def __init__(self, *size, explored=None, start=None):
+    def __init__(self, *shape, goal=None, start=None):
 
-        assert size or explored is not None
+        assert shape, "World must have a defined shape"
 
-        if explored is None:
-            self.explored = np.zeros(size, dtype=np.int)
-            self.size = np.array(size)
-        else:
-            self.explored = explored
-            self.size = np.array(self.explored.shape)
+        self.explored = np.zeros((0, len(shape)), dtype=np.float)
+        self.shape = np.array(shape)
 
         if start is None:
-            self.position = np.zeros([len(self.size)], dtype=np.int)
-        else:
-            self.position = np.array(start)
+            start = (0,) * len(shape)
+        self.position = start
 
-        self.move(*(0,) * len(self.size))
+        self.goal = goal if goal is not None else (5,) * len(shape)
 
-    def surroundings(self, radius):
-        """Retrieve surroundings within a given radius."""
+    @property
+    def position(self):
+        """Current explorer position."""
+        return self.explored[-1]
 
-        radius = radius if radius is not None else radius
-        return np.pad(
-            self.explored, radius, "constant", constant_values=-1
-        )[tuple(slice(n, n + 1 + 2 * radius) for n in self.position)]
+    @position.setter
+    def position(self, value):
+        """Set explorer position."""
+        self.explored = np.vstack([self.explored, value])
 
-    def move(self, *delta):
-        """Move turtle."""
+    @property
+    def distance_to_goal(self):
+        """Return the current distance to the goal."""
+        return np.sqrt(((self.goal - self.position)**2).sum())
 
-        assert len(delta) == self.position.shape[0], "Invalid delta shape"
-        assert all(d in (-1, 0, 1) for d in delta), "Too much movement"
+    def random_goal(self):
+        """Choose a random goal."""
+        self.goal = np.array([np.random.randint(axis) for axis in self.shape])
+        return self.goal
 
-        position = self.position.copy()
+    def distances(self, center):
+        """Calculate distances from all explored points to a given center."""
+        return np.sqrt(((center - self.explored)**2).sum(axis=1)).min()
 
-        position += delta
-        position = np.array([
-            max(0, min(p, s - 1)) for p, s in zip(position, self.size)
-        ])
+    def key_points(self, n_points):
+        """Use Mini-Batch K-Means clustering to develop :data:`n_clusters`
+        clusters that are representative of the empty space in the
+        :class:Loc8World`."""
 
-        if self.explored[tuple(position)] == -1:
-            return self.position
+        results = []
 
-        self.position = position
-        self.explored[tuple(self.position)] = True
-        return self.position
+        for coords in cartesian([np.arange(axis) for axis in self.shape]):
+            results.append((coords, self.distances(coords)))
+
+        largest = max(results, key=lambda a: a[1])[1]
+        filtered = filter(lambda a: a[1] >= largest / 2, results)
+
+        far_points = np.array([point[0] for point in filtered])
+
+        if len(far_points) < n_points:
+            far_points = np.tile(
+                far_points.T,
+                int(np.ceil(n_points / len(far_points)))
+            ).T[:n_points]
+
+        centers = MiniBatchKMeans(
+            n_clusters=n_points
+        ).fit(far_points).cluster_centers_
+
+        return centers
 
 
 class Loc8Env(krl.Env):
@@ -68,58 +88,58 @@ class Loc8Env(krl.Env):
 
     reward_range = (-1, 1)
 
-    def __init__(self, *size, radius=1):
+    def __init__(self, *shape, n_points, moving_average_len=3):
 
-        assert size
+        self.world = Loc8World(*shape)
+        self.n_points = n_points
 
-        self.world = Loc8World(*size)
-        self.radius = radius
-
-        dims = len(self.world.size)
-
-        self.directions = np.array(
-            np.meshgrid(*[[-1, 0, 1]] * dims)
-        ).T.reshape(-1, dims)
+        self.choices = deque(maxlen=moving_average_len)
 
     ########
 
     def observe(self):
         """Retrieve observations for reinforcement learning."""
-        return self.world.surroundings(self.radius).flatten()
+        return self.world.key_points(self.n_points)
 
-    def collect_reward(self):
-        """Collect reward for reinforcement learning step."""
-        return (1 - np.abs(self.world.surroundings(self.radius))).sum()
+    # def collect_reward(self):
+    #     """Collect reward for reinforcement learning step."""
+    #     return 0  # HACK
+    #     return (1 - np.abs(self.world.surroundings(self.radius))).sum()
 
     ########
 
     def step(self, action):
 
-        self.world.move(*self.directions[action])
-
         observation = self.observe()
-        reward = self.collect_reward()
-        done = (observation == 100).any()  # HACK
+        # n = np.random.choice(len(observation))  # HACK
+        # self.choices.append(observation[n])  # HACK
+        self.choices.append(observation[action])
 
-        if done:
-            reward = 100
+        moving_towards = np.mean(self.choices, axis=0)
+
+        # d = moving_towards - self.world.position
+        # self.world.position += np.sqrt((d**2).sum())
+        # self.world.position += d / 2  # np.sqrt((d**2).sum())
+        self.world.position = moving_towards
+
+        # reward = self.collect_reward()
+
+        done = self.world.distance_to_goal < 3  # TODO
+
+        reward = 1 if done else 0
 
         # observation, reward, done, info
-        return observation, reward, done, {}
+        return observation.flatten(), reward, done, {}
 
     def reset(self):
 
-        size = self.world.size
+        plt.clf()
+        plt.xlim(0, self.world.shape[0])
+        plt.ylim(0, self.world.shape[1])
 
-        explored = np.zeros(size, dtype=np.int)
+        self.world = Loc8World(*self.world.shape)
 
-        goal = (0, 0)
-        while goal == (0, 0):
-            goal = tuple(np.random.randint(n) for n in explored.shape)
-        explored[goal] = 100
-
-        self.world = Loc8World(*self.world.size, explored=explored)
-        return self.observe()
+        return self.observe().flatten()
 
     ########
 
@@ -128,60 +148,33 @@ class Loc8Env(krl.Env):
         if mode != "human":
             return
 
-        if self.world.explored.ndim == 1:
-            self.render_1d()
-        elif self.world.explored.ndim == 2:
-            self.render_2d()
-
-    def render_1d(self):
-        """Render a one-dimensional world using ASCII."""
-        for i, col in enumerate(self.world.explored):
-            if i == self.world.position:
-                print("●", end='')
-            elif self.world.explored[i] == 100:
-                print("X", end='')
-            else:
-                print(("□", " ", "█")[col + 1], end='')
-        print('|')
-
-    def render_2d(self):
-        """Render a two-dimensional world using ASCII."""
-        for i, row in enumerate(self.world.explored):
-            for j, col in enumerate(row):
-                if ([i, j] == self.world.position).all():
-                    print("●", end='')
-                elif self.world.explored[i, j] == 100:
-                    print("X", end='')
-                else:
-                    print(("□", " ", "█")[col + 1], end='')
-            print('|')
+        plt.plot(*np.expand_dims(self.world.position, 0).T, 'o')
+        plt.pause(0.05)
 
     ########
 
     def close(self):
-        print("close")
+        pass
 
     def seed(self, seed=None):
         return []
 
     def configure(self):
-        print("configure")
+        pass
 
 ###
 
 
-def run(*size, radius, nb_dense=8, dense_output=16):
+def run(*size, n_points):
     """Run reinforcement learning algorithm with a given world size."""
 
-    env = Loc8Env(*size, radius=radius)
-    nb_actions = len(env.directions)
-    observation_shape = ((2 * radius + 1)**2,)  # flattenned
+    env = Loc8Env(*size, n_points=n_points)
+    nb_actions = n_points  # TODO
+    # observation_shape = (n_points, len(size))  # unflattenned
+    observation_shape = (n_points * len(size),)  # flattenned
 
     model = Sequential()
     model.add(LSTM(2, input_shape=(1,) + observation_shape))
-
-    for _ in range(nb_dense):
-        model.add(Dense(dense_output))
 
     model.add(Dense(nb_actions))  # Desired output shape
     model.add(Activation("linear"))
@@ -194,10 +187,11 @@ def run(*size, radius, nb_dense=8, dense_output=16):
         nb_actions=nb_actions,
         memory=memory,
         nb_steps_warmup=10,
+        train_interval=10,
         target_model_update=1e-2,
         policy=policy
     )
-    dqn.compile(Adam(lr=1e-3), metrics=['mae'])
+    dqn.compile(Adam(lr=1e-3), metrics=["mae"])
 
     dqn.fit(env, nb_steps=50000, visualize=False, verbose=2)
 
@@ -206,17 +200,4 @@ def run(*size, radius, nb_dense=8, dense_output=16):
     dqn.test(env, nb_episodes=5, visualize=True)
 
 if __name__ == "__main__":
-
-    parser = argparse.ArgumentParser(description="Loc8 Engine")
-    parser.add_argument(
-        "--nb_dense", help="the number of dense layers to use",
-        type=int, default=8
-    )
-    parser.add_argument(
-        "--dense_output", help="the number of nodes per dense layer",
-        type=int, default=16
-    )
-
-    args = parser.parse_args()
-
-    run(20, 20, radius=2, **args.__dict__)
+    run(20, 20, n_points=5)
