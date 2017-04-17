@@ -5,12 +5,12 @@ from collections import deque
 import matplotlib.pyplot as plt
 import numpy as np
 import rl.core as krl
-from keras.layers import LSTM, Activation, Dense
-from keras.models import Sequential
+from keras.layers import LSTM, Activation, Dense, Flatten, Input, concatenate
+from keras.models import Model, Sequential
 from keras.optimizers import Adam
-from rl.agents.dqn import DQNAgent
+from rl.agents import DDPGAgent
 from rl.memory import SequentialMemory
-from rl.policy import EpsGreedyQPolicy
+from rl.random import OrnsteinUhlenbeckProcess
 from sklearn.cluster import MiniBatchKMeans
 from sklearn.utils.extmath import cartesian
 
@@ -58,7 +58,7 @@ class Loc8World:
     def key_points(self, n_points):
         """Use Mini-Batch K-Means clustering to develop :data:`n_clusters`
         clusters that are representative of the empty space in the
-        :class:Loc8World`."""
+        :class:`Loc8World`."""
 
         results = []
 
@@ -101,16 +101,20 @@ class Loc8Env(krl.Env):
         """Retrieve observations for reinforcement learning."""
         return self.world.key_points(self.n_points)
 
-    # def collect_reward(self):
-    #     """Collect reward for reinforcement learning step."""
-    #     return 0  # HACK
-    #     return (1 - np.abs(self.world.surroundings(self.radius))).sum()
+    def collect_reward(self):
+        """Collect reward for reinforcement learning step."""
+        return 0  # HACK
+        return (1 - np.abs(self.world.surroundings(self.radius))).sum()
 
     ########
 
     def step(self, action):
 
+        action = np.clip(action, -1, 1)
+
         observation = self.observe()
+        print(observation)
+        print(action)
         # n = np.random.choice(len(observation))  # HACK
         # self.choices.append(observation[n])  # HACK
         self.choices.append(observation[action])
@@ -122,14 +126,12 @@ class Loc8Env(krl.Env):
         # self.world.position += d / 2  # np.sqrt((d**2).sum())
         self.world.position = moving_towards
 
-        # reward = self.collect_reward()
+        reward = self.collect_reward()
 
         done = self.world.distance_to_goal < 3  # TODO
 
-        reward = 1 if done else 0
-
         # observation, reward, done, info
-        return observation.flatten(), reward, done, {}
+        return observation, reward, done, {}
 
     def reset(self):
 
@@ -139,7 +141,7 @@ class Loc8Env(krl.Env):
 
         self.world = Loc8World(*self.world.shape)
 
-        return self.observe().flatten()
+        return self.observe()
 
     ########
 
@@ -169,35 +171,55 @@ def run(*size, n_points):
     """Run reinforcement learning algorithm with a given world size."""
 
     env = Loc8Env(*size, n_points=n_points)
-    nb_actions = n_points  # TODO
-    # observation_shape = (n_points, len(size))  # unflattenned
-    observation_shape = (n_points * len(size),)  # flattenned
+    nb_actions = len(env.world.shape)
+    observation_shape = (n_points, len(size))  # unflattenned
 
-    model = Sequential()
-    model.add(LSTM(2, input_shape=(1,) + observation_shape))
+    actor = Sequential()
+    actor.add(Flatten(input_shape=(1,) + observation_shape))
+    actor.add(Dense(16))
+    actor.add(Activation('relu'))
+    actor.add(Dense(16))
+    actor.add(Activation('relu'))
+    actor.add(Dense(16))
+    actor.add(Activation('relu'))
+    actor.add(Dense(nb_actions))
+    actor.add(Activation('linear'))
+    print(actor.summary())
 
-    model.add(Dense(nb_actions))  # Desired output shape
-    model.add(Activation("linear"))
-    print(model.summary())
+    action_input = Input(shape=(nb_actions,), name='action_input')
+    observation_input = Input(
+        shape=(1,) + observation_shape, name='observation_input')
+    flattened_observation = Flatten()(observation_input)
+    x = concatenate([action_input, flattened_observation])
+    x = Dense(32, activation="relu")(x)
+    x = Dense(32, activation="relu")(x)
+    x = Dense(32, activation="relu")(x)
+    x = Dense(1, activation="tanh")(x)
+    critic = Model(inputs=[action_input, observation_input], outputs=[x])
+    print(critic.summary())
 
-    memory = SequentialMemory(limit=50000, window_length=1)
-    policy = EpsGreedyQPolicy(eps=.1)
-    dqn = DQNAgent(
-        model=model,
+    memory = SequentialMemory(limit=100000, window_length=1)
+    random_process = OrnsteinUhlenbeckProcess(
+        size=nb_actions, theta=.15, mu=0., sigma=.3)
+    agent = DDPGAgent(
         nb_actions=nb_actions,
+        actor=actor,
+        critic=critic,
+        critic_action_input=action_input,
         memory=memory,
-        nb_steps_warmup=10,
-        train_interval=10,
-        target_model_update=1e-2,
-        policy=policy
+        nb_steps_warmup_critic=100,
+        nb_steps_warmup_actor=100,
+        random_process=random_process,
+        gamma=.99,
+        target_model_update=1e-3
     )
-    dqn.compile(Adam(lr=1e-3), metrics=["mae"])
+    agent.compile(Adam(lr=.001, clipnorm=1.), metrics=['mae'])
 
-    dqn.fit(env, nb_steps=50000, visualize=False, verbose=2)
+    agent.fit(env, nb_steps=50000, visualize=False, verbose=2)
 
-    # dqn.save_weights("loc8_weights.h5f", overwrite=True)
+    # agent.save_weights("loc8_weights.h5f", overwrite=True)
 
-    dqn.test(env, nb_episodes=5, visualize=True)
+    agent.test(env, nb_episodes=5, visualize=True)
 
 if __name__ == "__main__":
     run(20, 20, n_points=5)
