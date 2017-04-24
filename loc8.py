@@ -29,7 +29,7 @@ class Loc8World:
             start = (0,) * len(shape)
         self.position = start
 
-        self.goal = goal if goal is not None else (5,) * len(shape)
+        self.goal = goal if goal is not None else self.random_goal()
 
     @property
     def position(self):
@@ -55,10 +55,7 @@ class Loc8World:
         """Calculate distances from all explored points to a given center."""
         return np.sqrt(((center - self.explored)**2).sum(axis=1)).min()
 
-    def key_points(self, n_points):
-        """Use Mini-Batch K-Means clustering to develop :data:`n_clusters`
-        clusters that are representative of the empty space in the
-        :class:`Loc8World`."""
+    def far_points(self):
 
         results = []
 
@@ -69,6 +66,15 @@ class Loc8World:
         filtered = filter(lambda a: a[1] >= largest / 2, results)
 
         far_points = np.array([point[0] for point in filtered])
+
+        return far_points
+
+    def key_points(self, n_points):
+        """Use Mini-Batch K-Means clustering to develop :data:`n_clusters`
+        clusters that are representative of the empty space in the
+        :class:`Loc8World`."""
+
+        far_points = self.far_points()
 
         if len(far_points) < n_points:
             far_points = np.tile(
@@ -93,6 +99,8 @@ class Loc8Env(krl.Env):
         self.world = Loc8World(*shape)
         self.n_points = n_points
 
+        self.observation = np.zeros([1, len(self.world.shape)])
+
         self.choices = deque(maxlen=moving_average_len)
 
     ########
@@ -101,34 +109,30 @@ class Loc8Env(krl.Env):
         """Retrieve observations for reinforcement learning."""
         return self.world.key_points(self.n_points)
 
-    def collect_reward(self):
-        """Collect reward for reinforcement learning step."""
-        return 0  # HACK
-        return (1 - np.abs(self.world.surroundings(self.radius))).sum()
-
     ########
 
     def step(self, action):
 
-        action = np.clip(action, -1, 1)
+        closest = np.argmin(
+            np.sqrt(np.sum((self.observation - action)**2, axis=1))
+        )
+        self.choices.append(self.observation[closest])
 
         observation = self.observe()
-        print(observation)
-        print(action)
-        # n = np.random.choice(len(observation))  # HACK
-        # self.choices.append(observation[n])  # HACK
-        self.choices.append(observation[action])
+        self.observation = observation
 
         moving_towards = np.mean(self.choices, axis=0)
 
-        # d = moving_towards - self.world.position
-        # self.world.position += np.sqrt((d**2).sum())
-        # self.world.position += d / 2  # np.sqrt((d**2).sum())
-        self.world.position = moving_towards
-
-        reward = self.collect_reward()
+        d = moving_towards - self.world.position
+        if not np.all(d == 0):
+            self.world.position += d / np.sqrt((d**2).sum())
 
         done = self.world.distance_to_goal < 3  # TODO
+
+        if done:
+            reward = 1
+        else:
+            reward = 1 - len(self.world.far_points())
 
         # observation, reward, done, info
         return observation, reward, done, {}
@@ -167,36 +171,28 @@ class Loc8Env(krl.Env):
 ###
 
 
-def run(*size, n_points):
+def run(*size, n_points, **kwargs):
     """Run reinforcement learning algorithm with a given world size."""
 
-    env = Loc8Env(*size, n_points=n_points)
+    env = Loc8Env(*size, n_points=n_points, **kwargs)
     nb_actions = len(env.world.shape)
-    observation_shape = (n_points, len(size))  # unflattenned
+    observation_shape = (n_points, len(size))
 
     actor = Sequential()
     actor.add(Flatten(input_shape=(1,) + observation_shape))
-    actor.add(Dense(16))
-    actor.add(Activation('relu'))
-    actor.add(Dense(16))
-    actor.add(Activation('relu'))
-    actor.add(Dense(16))
-    actor.add(Activation('relu'))
     actor.add(Dense(nb_actions))
-    actor.add(Activation('linear'))
-    print(actor.summary())
+    actor.add(Activation("sigmoid"))
+    actor.summary()
 
-    action_input = Input(shape=(nb_actions,), name='action_input')
+    action_input = Input(shape=(nb_actions,), name="action_input")
     observation_input = Input(
-        shape=(1,) + observation_shape, name='observation_input')
+        shape=(1,) + observation_shape, name="observation_input")
     flattened_observation = Flatten()(observation_input)
     x = concatenate([action_input, flattened_observation])
-    x = Dense(32, activation="relu")(x)
-    x = Dense(32, activation="relu")(x)
-    x = Dense(32, activation="relu")(x)
+    x = Dense(16, activation="relu")(x)
     x = Dense(1, activation="tanh")(x)
     critic = Model(inputs=[action_input, observation_input], outputs=[x])
-    print(critic.summary())
+    critic.summary()
 
     memory = SequentialMemory(limit=100000, window_length=1)
     random_process = OrnsteinUhlenbeckProcess(
@@ -219,7 +215,7 @@ def run(*size, n_points):
 
     # agent.save_weights("loc8_weights.h5f", overwrite=True)
 
-    agent.test(env, nb_episodes=5, visualize=True)
+    agent.test(env, nb_episodes=10, visualize=True)
 
 if __name__ == "__main__":
     run(20, 20, n_points=5)
