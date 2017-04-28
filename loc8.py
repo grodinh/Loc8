@@ -5,7 +5,7 @@ from collections import deque
 import matplotlib.pyplot as plt
 import numpy as np
 import rl.core as krl
-from keras.layers import LSTM, Activation, Dense, Flatten, Input, concatenate
+from keras.layers import Activation, Dense, Flatten, Input, concatenate
 from keras.models import Model, Sequential
 from keras.optimizers import Adam
 from rl.agents import DDPGAgent
@@ -53,14 +53,14 @@ class Loc8World:
 
     def distances(self, center):
         """Calculate distances from all explored points to a given center."""
-        return np.sqrt(((center - self.explored)**2).sum(axis=1)).min()
+        return np.sqrt(((center - self.explored)**2).sum(axis=1))
 
     def far_points(self):
 
         results = []
 
         for coords in cartesian([np.arange(axis) for axis in self.shape]):
-            results.append((coords, self.distances(coords)))
+            results.append((coords, self.distances(coords).min()))
 
         largest = max(results, key=lambda a: a[1])[1]
         filtered = filter(lambda a: a[1] >= largest / 2, results)
@@ -111,15 +111,20 @@ class Loc8Env(krl.Env):
 
     ########
 
-    def step(self, action):
+    def step(self, raw_action):
 
-        closest = np.argmin(
-            np.sqrt(np.sum((self.observation - action)**2, axis=1))
+        action = np.clip(raw_action, 0, 1)
+
+        p = action * self.world.shape
+        plt.plot([p[0]], [p[1]], 's', markersize=15)
+        closest_key = np.argmin(
+            np.sqrt(np.sum((self.observation - action * self.world.shape)**2, axis=1))
         )
-        self.choices.append(self.observation[closest])
+        self.choices.append(self.observation[closest_key])
 
         observation = self.observe()
         self.observation = observation
+        plt.plot(*observation.T, 'v')
 
         moving_towards = np.mean(self.choices, axis=0)
 
@@ -132,7 +137,17 @@ class Loc8Env(krl.Env):
         if done:
             reward = 1
         else:
-            reward = 1 - len(self.world.far_points())
+
+            distance_to_target = np.sqrt((d**2).sum())
+
+            dd = raw_action - self.world.position
+            distance_to_action = np.sqrt(dd**2).min()
+
+            nd = self.world.explored - self.world.position
+            n = np.sqrt((nd**2).sum(axis=1))
+            nearby_points = np.sum(n < 5)
+
+            reward = 1 - distance_to_target - 10*distance_to_action - 10*nearby_points
 
         # observation, reward, done, info
         return observation, reward, done, {}
@@ -145,6 +160,9 @@ class Loc8Env(krl.Env):
 
         self.world = Loc8World(*self.world.shape)
 
+        goal = self.world.goal
+        plt.plot([goal[0]], [goal[1]], 'g^', markersize=20)
+
         return self.observe()
 
     ########
@@ -155,7 +173,7 @@ class Loc8Env(krl.Env):
             return
 
         plt.plot(*np.expand_dims(self.world.position, 0).T, 'o')
-        plt.pause(0.05)
+        plt.pause(0.01)
 
     ########
 
@@ -189,7 +207,7 @@ def run(*size, n_points, **kwargs):
         shape=(1,) + observation_shape, name="observation_input")
     flattened_observation = Flatten()(observation_input)
     x = concatenate([action_input, flattened_observation])
-    x = Dense(16, activation="relu")(x)
+    x = Dense(16, activation="sigmoid")(x)
     x = Dense(1, activation="tanh")(x)
     critic = Model(inputs=[action_input, observation_input], outputs=[x])
     critic.summary()
@@ -218,4 +236,4 @@ def run(*size, n_points, **kwargs):
     agent.test(env, nb_episodes=10, visualize=True)
 
 if __name__ == "__main__":
-    run(20, 20, n_points=5)
+    run(20, 20, n_points=5, moving_average_len=10)
