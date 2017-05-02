@@ -5,7 +5,7 @@ from collections import deque
 import matplotlib.pyplot as plt
 import numpy as np
 import rl.core as krl
-from keras.layers import Activation, Dense, Flatten, Input, concatenate
+from keras.layers import Dense, Flatten, Input, concatenate
 from keras.models import Model, Sequential
 from keras.optimizers import Adam
 from rl.agents import DDPGAgent
@@ -195,12 +195,11 @@ def run(*size, n_points, **kwargs):
 
     env = Loc8Env(*size, n_points=n_points, **kwargs)
     nb_actions = len(env.world.shape)
-    observation_shape = (n_points, len(size))
+    observation_shape = size  # TODO
 
     actor = Sequential()
     actor.add(Flatten(input_shape=(1,) + observation_shape))
-    actor.add(Dense(nb_actions))
-    actor.add(Activation("sigmoid"))
+    actor.add(Dense(nb_actions, activation="sigmoid"))
     actor.summary()
 
     action_input = Input(shape=(nb_actions,), name="action_input")
@@ -208,8 +207,8 @@ def run(*size, n_points, **kwargs):
         shape=(1,) + observation_shape, name="observation_input")
     flattened_observation = Flatten()(observation_input)
     x = concatenate([action_input, flattened_observation])
-    x = Dense(16, activation="sigmoid")(x)
-    x = Dense(1, activation="tanh")(x)
+    x = Dense(16)(x)
+    x = Dense(1, activation="sigmoid")(x)
     critic = Model(inputs=[action_input, observation_input], outputs=[x])
     critic.summary()
 
@@ -234,7 +233,7 @@ def run(*size, n_points, **kwargs):
 
     # agent.save_weights("loc8_weights.h5f", overwrite=True)
 
-    agent.test(env, nb_episodes=10, visualize=True)
+    agent.test(env, nb_episodes=50, visualize=True)
 
 if __name__ == "__main__":
     run(20, 20, n_points=5, moving_average_len=10)
