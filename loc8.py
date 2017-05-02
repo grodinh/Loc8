@@ -42,6 +42,16 @@ class Loc8World:
         self.explored = np.vstack([self.explored, value])
 
     @property
+    def array(self):
+
+        array = np.zeros(self.shape)
+
+        for coord in np.floor(self.explored).astype(np.int):
+            array[tuple(coord)] += 1
+
+        return array
+
+    @property
     def distance_to_goal(self):
         """Return the current distance to the goal."""
         return np.sqrt(((self.goal - self.position)**2).sum())
@@ -99,15 +109,13 @@ class Loc8Env(krl.Env):
         self.world = Loc8World(*shape)
         self.n_points = n_points
 
-        self.observation = np.zeros([1, len(self.world.shape)])
-
         self.choices = deque(maxlen=moving_average_len)
 
     ########
 
     def observe(self):
         """Retrieve observations for reinforcement learning."""
-        return self.world.key_points(self.n_points)
+        return self.world.array
 
     ########
 
@@ -115,16 +123,16 @@ class Loc8Env(krl.Env):
 
         action = np.clip(raw_action, 0, 1)
 
+        observation = self.observe()
+        key_points = self.world.key_points(self.n_points)
+
         p = action * self.world.shape
         plt.plot([p[0]], [p[1]], 's', markersize=15)
         closest_key = np.argmin(
-            np.sqrt(np.sum((self.observation - action * self.world.shape)**2, axis=1))
+            np.sqrt(np.sum((key_points - action * self.world.shape)**2, axis=1))
         )
-        self.choices.append(self.observation[closest_key])
-
-        observation = self.observe()
-        self.observation = observation
-        plt.plot(*observation.T, 'v')
+        plt.plot(*key_points[closest_key].T, 'v', markersize=10)
+        self.choices.append(key_points[closest_key])
 
         moving_towards = np.mean(self.choices, axis=0)
 
@@ -134,20 +142,13 @@ class Loc8Env(krl.Env):
 
         done = self.world.distance_to_goal < 3  # TODO
 
+        max_reward = np.prod(self.world.shape)
         if done:
-            reward = 1
+            reward = max_reward
         else:
-
-            distance_to_target = np.sqrt((d**2).sum())
-
-            dd = raw_action - self.world.position
-            distance_to_action = np.sqrt(dd**2).min()
-
-            nd = self.world.explored - self.world.position
-            n = np.sqrt((nd**2).sum(axis=1))
-            nearby_points = np.sum(n < 5)
-
-            reward = 1 - distance_to_target - 10*distance_to_action - 10*nearby_points
+            # reward = 0
+            reward = np.sum(np.abs(self.world.array))
+            # reward = -np.sum(1 - np.abs(self.world.array))
 
         # observation, reward, done, info
         return observation, reward, done, {}
