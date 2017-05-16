@@ -5,14 +5,10 @@ from collections import deque
 import matplotlib.pyplot as plt
 import numpy as np
 import rl.core as krl
-from keras.layers import Dense, Flatten, Input, concatenate
-from keras.models import Model, Sequential
 from keras.optimizers import Adam
-from rl.agents import DDPGAgent
-from rl.memory import SequentialMemory
-from rl.random import OrnsteinUhlenbeckProcess
 from sklearn.cluster import MiniBatchKMeans
-from sklearn.utils.extmath import cartesian
+
+from model import model
 
 
 class Loc8World:
@@ -195,37 +191,10 @@ def run(*size, n_points, **kwargs):
 
     env = Loc8Env(*size, n_points=n_points, **kwargs)
     nb_actions = len(env.world.shape)
-    observation_shape = size  # TODO
 
-    actor = Sequential()
-    actor.add(Flatten(input_shape=(1,) + observation_shape))
-    actor.add(Dense(nb_actions, activation="sigmoid"))
-    actor.summary()
-
-    action_input = Input(shape=(nb_actions,), name="action_input")
-    observation_input = Input(
-        shape=(1,) + observation_shape, name="observation_input")
-    flattened_observation = Flatten()(observation_input)
-    x = concatenate([action_input, flattened_observation])
-    x = Dense(16)(x)
-    x = Dense(1, activation="sigmoid")(x)
-    critic = Model(inputs=[action_input, observation_input], outputs=[x])
-    critic.summary()
-
-    memory = SequentialMemory(limit=100000, window_length=1)
-    random_process = OrnsteinUhlenbeckProcess(
-        size=nb_actions, theta=.15, mu=0., sigma=.3)
-    agent = DDPGAgent(
-        nb_actions=nb_actions,
-        actor=actor,
-        critic=critic,
-        critic_action_input=action_input,
-        memory=memory,
-        nb_steps_warmup_critic=100,
-        nb_steps_warmup_actor=100,
-        random_process=random_process,
-        gamma=.99,
-        target_model_update=1e-3
+    agent = model(
+        nb_actions, observation_shape,
+        actor_dense=actor_dense, critic_dense=critic_dense
     )
     agent.compile(Adam(lr=.001, clipnorm=1.), metrics=['mae'])
 
