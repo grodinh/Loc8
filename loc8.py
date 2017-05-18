@@ -43,7 +43,8 @@ class Loc8World:
         array = np.zeros(self.shape)
 
         for coord in np.floor(self.explored).astype(np.int):
-            array[tuple(coord)] += 1
+            if (coord < self.shape).all():
+                array[tuple(coord)] = 1
 
         return array
 
@@ -65,7 +66,7 @@ class Loc8World:
 
         results = []
 
-        for coords in cartesian([np.arange(axis) for axis in self.shape]):
+        for coords in np.argwhere(self.array == 0):
             results.append((coords, self.distances(coords).min()))
 
         largest = max(results, key=lambda a: a[1])[1]
@@ -98,53 +99,38 @@ class Loc8World:
 class Loc8Env(krl.Env):
     """Loc8 environment."""
 
-    reward_range = (-1, 1)
-
-    def __init__(self, *shape, n_points, moving_average_len=3):
+    def __init__(self, *shape, n_points, vision=3, moving_average_len=3):
 
         self.world = Loc8World(*shape)
         self.n_points = n_points
+        self.vision = vision
+
+        self.steps = 0
+        self.observation = self.observe()
 
         self.choices = deque(maxlen=moving_average_len)
 
-    ########
-
     def observe(self):
         """Retrieve observations for reinforcement learning."""
-        return self.world.array
+        return self.world.array.reshape(5, 5, 5, 5).mean(axis=(3, 1)).flatten()
 
-    ########
+    def step(self, action):
 
-    def step(self, raw_action):
-
-        action = np.clip(raw_action, 0, 1)
-
-        observation = self.observe()
-        key_points = self.world.key_points(self.n_points)
-
-        p = action * self.world.shape
-        plt.plot([p[0]], [p[1]], 's', markersize=15)
-        closest_key = np.argmin(
-            np.sqrt(np.sum((key_points - action * self.world.shape)**2, axis=1))
-        )
-        plt.plot(*key_points[closest_key].T, 'v', markersize=10)
-        self.choices.append(key_points[closest_key])
+        action = np.clip(action, 0, 1) * self.world.shape
+        self.choices.append(action)
 
         moving_towards = np.mean(self.choices, axis=0)
+        delta = moving_towards - self.world.position
+        if not np.all(delta == 0):
+            self.world.position += delta / np.sqrt((delta**2).sum())
 
-        d = moving_towards - self.world.position
-        if not np.all(d == 0):
-            self.world.position += d / np.sqrt((d**2).sum())
+        observation = self.observe()
 
-        done = self.world.distance_to_goal < 3  # TODO
+        done = self.world.distance_to_goal < self.vision
 
-        max_reward = np.prod(self.world.shape)
-        if done:
-            reward = max_reward
-        else:
-            # reward = 0
-            reward = np.sum(np.abs(self.world.array))
-            # reward = -np.sum(1 - np.abs(self.world.array))
+        reward = np.sum(observation - self.observation) * 10
+        self.observation = observation
+        self.steps += 1
 
         # observation, reward, done, info
         return observation, reward, done, {}
@@ -155,12 +141,14 @@ class Loc8Env(krl.Env):
         plt.xlim(0, self.world.shape[0])
         plt.ylim(0, self.world.shape[1])
 
-        self.world = Loc8World(*self.world.shape)
+        self.world = Loc8World(*self.world.shape, goal=(5, 20))
 
         goal = self.world.goal
         plt.plot([goal[0]], [goal[1]], 'g^', markersize=20)
 
-        return self.observe()
+        self.steps = 0
+        self.observation = self.observe()
+        return self.observation
 
     ########
 
@@ -177,20 +165,15 @@ class Loc8Env(krl.Env):
     def close(self):
         pass
 
-    def seed(self, seed=None):
-        return []
-
-    def configure(self):
-        pass
-
 ###
 
 
-def run(*size, n_points, **kwargs):
+def run(*shape, n_points, actor_dense=1, critic_dense=1, **kwargs):
     """Run reinforcement learning algorithm with a given world size."""
 
-    env = Loc8Env(*size, n_points=n_points, **kwargs)
+    env = Loc8Env(*shape, n_points=n_points, **kwargs)
     nb_actions = len(env.world.shape)
+    observation_shape = (25,)  # (np.prod(env.world.shape),)
 
     agent = model(
         nb_actions, observation_shape,
@@ -205,4 +188,4 @@ def run(*size, n_points, **kwargs):
     agent.test(env, nb_episodes=50, visualize=True)
 
 if __name__ == "__main__":
-    run(20, 20, n_points=5, moving_average_len=10)
+    run(25, 25, n_points=5, moving_average_len=10)
